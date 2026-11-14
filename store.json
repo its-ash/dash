@@ -1,0 +1,11 @@
+{
+  "id": "dash",
+  "name": "Dash",
+  "repo": "its-ash/dash",
+  "package": "com.itsash.dash",
+  "tagline": "Offline GPS speedometer with a windshield HUD, speed limit alert and trip log.",
+  "description": "Dash is a GPS speedometer for car, bike, cycling and walking. See your speed as big digits or an analog gauge, switch between km/h, mph and knots, and flip to a mirrored HUD that reflects in the windshield. Set a speed limit and get a beep and vibration when you go over. Record trips with the screen off, see each route and speed chart, export GPX and keep an odometer. Everything runs on your phone, with no maps, ads or tracking.",
+  "category": "Travel",
+  "icon": "assets/icon/logo-1024.png",
+  "homepage": "https://dash.itsash.in/"
+}
