@@ -10,10 +10,15 @@ Offline GPS speedometer with a windshield HUD, speed limit alert and trip log.
 - **HUD mode**: full-screen mirrored digits on black, landscape and full brightness, so the speed reflects in the windshield.
 - **Speed limit alert**: set a limit and get a warning colour, a beep and a vibration. It has hysteresis, so it does not flicker around the limit.
 - **Trips**: start, pause and stop. Recording continues with the screen off through a foreground service, with a live speed notification.
-- **Trip history**: each trip has its route (a plain polyline, no map tiles) and a speed-over-time chart.
+- **Automatic trips**: with Dash open, a trip starts after about 20 seconds above 15 km/h, and ends after 5 minutes without moving (also with the screen off).
+- **Home-screen widget**: odometer, last trip, and a Start / Stop trip button.
+- **G-force meter**: live acceleration, braking and cornering from the accelerometer. Dash learns which way the phone faces from GPS; without an accelerometer it falls back to GPS.
+- **Trip history**: each trip has its route (a plain polyline, no map tiles) colored by speed, with hard braking, hard acceleration and sharp cornering marked on it, plus speed and altitude charts with total climb and descent.
+- **Google Maps**: open any trip in Google Maps, or share a Maps link to it. No API key: it is a plain Maps link with the start, the end and up to 8 stops.
+- **GPS details**: altitude, heading, accuracy and the number of satellites in use and in view.
 - **Odometer and GPX**: a total across all trips, and export of any trip as GPX through the share sheet.
 - **Clean data**: bad fixes are rejected, speed is smoothed, distance uses the haversine formula, and speed under 1.5 km/h counts as standing still.
-- **Private**: no accounts, no ads, no maps. The only network call is the update check in Settings.
+- **Private**: no accounts, no ads, no map tiles. The only network call is the update check in Settings; Google Maps opens only when you tap it.
 
 ## Install
 
@@ -54,7 +59,10 @@ lib/
 │   ├── trip.dart                 # Trip, TrackPoint
 │   ├── overspeed.dart            # limit alert with hysteresis
 │   ├── gpx.dart                  # GPX writer
-│   └── chart_data.dart           # speed series for the chart
+│   ├── gforce.dart               # g-force (sensor + GPS), peaks, harsh events
+│   ├── maps_link.dart            # Google Maps directions link for a trip
+│   ├── satellites.dart           # satellite counts
+│   └── chart_data.dart           # speed and altitude series, climb/descent
 ├── platform/                     # Android channels, GPX share
 ├── state/dash_controller.dart    # live state, trip control
 ├── storage/trip_repository.dart  # trips as JSON files
@@ -62,9 +70,11 @@ lib/
 ├── widgets/                      # digits, gauge, route
 └── screens/                      # home, HUD, trips, trip detail, settings
 android/app/src/main/kotlin/com/itsash/dash/
-├── MainActivity.kt               # channels, GPS stream, vibrate, beep
-├── TrackingService.kt            # foreground location service
-└── TrackLog.kt                   # active trip log, prefs
+├── MainActivity.kt               # channels, GPS/GNSS/accelerometer streams, vibrate, beep
+├── TrackingService.kt            # foreground location service, auto-stop
+├── TripControl.kt                # start / end a trip (app, service, widget)
+├── DashWidget.kt                 # home-screen widget
+└── TrackLog.kt                   # active and pending trip logs, prefs
 ```
 
 ## License

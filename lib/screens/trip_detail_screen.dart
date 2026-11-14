@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:theme/theme.dart';
 
 import '../core/chart_data.dart';
+import '../core/gforce.dart';
+import '../core/maps_link.dart';
 import '../core/trip.dart';
 import '../core/units.dart';
+import '../platform/dash_platform.dart';
 import '../platform/gpx_share.dart';
 import '../settings/settings_store.dart';
 import '../storage/trip_repository.dart';
@@ -17,6 +20,8 @@ class TripDetailScreen extends StatefulWidget {
     required this.repository,
     required this.settings,
     this.share = shareTripGpx,
+    this.openUrl = openExternalUrl,
+    this.shareText = shareMapsLink,
   });
 
   final String tripId;
@@ -25,6 +30,12 @@ class TripDetailScreen extends StatefulWidget {
 
   /// Opens the share sheet for the GPX file. Replaced in tests.
   final Future<void> Function(Trip trip) share;
+
+  /// Opens a link in Google Maps (or the browser). Replaced in tests.
+  final Future<bool> Function(Uri url) openUrl;
+
+  /// Opens the share sheet with a Google Maps link. Replaced in tests.
+  final Future<void> Function(String text) shareText;
 
   @override
   State<TripDetailScreen> createState() => _TripDetailScreenState();
@@ -39,6 +50,25 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
     } catch (_) {
       if (mounted) context.showSnack('Could not share the GPX file.', status: UiStatus.danger);
     }
+  }
+
+  Future<void> _openMaps(Uri url) async {
+    final ok = await widget.openUrl(url).catchError((Object _) => false);
+    if (!ok && mounted) context.showSnack('Could not open Google Maps.', status: UiStatus.danger);
+  }
+
+  Future<void> _shareMaps(Trip trip, Uri url) async {
+    try {
+      await widget.shareText('Dash trip, ${formatDateTime(DateTime.fromMillisecondsSinceEpoch(trip.startMs))}\n$url');
+    } catch (_) {
+      if (mounted) context.showSnack('Could not share the link.', status: UiStatus.danger);
+    }
+  }
+
+  static String _clock(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(d.hour)}:${two(d.minute)}';
   }
 
   Future<void> _delete(Trip trip) async {
@@ -85,6 +115,9 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
   Widget _content(BuildContext context, Trip trip) {
     final unit = widget.settings.unit;
     final speeds = [for (final v in resampleSpeeds(trip.points, 80)) unit.fromMs(v)];
+    final mapsUrl = tripMapsUrl(trip);
+    final altitudes = resampleAltitudes(trip.points, 80);
+    final climb = climbAndDescent(trip.points);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -93,7 +126,9 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
           style: context.text.titleLarge,
         ),
         const UiGap(UiSpace.md),
-        RouteView(points: trip.points),
+        RouteView(points: trip.points, events: trip.events),
+        const UiGap(UiSpace.sm),
+        RouteLegend(points: trip.points, events: trip.events, unit: unit),
         const UiGap(UiSpace.lg),
         UiCard(
           child: Column(
@@ -114,6 +149,32 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
             ],
           ),
         ),
+        if (altitudes.length >= 2 && climb != null) ...[
+          const UiGap(UiSpace.lg),
+          UiCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Altitude (m)', style: context.text.titleSmall),
+                const UiGap(UiSpace.sm),
+                UiLineChart(
+                  series: [UiChartSeries('Altitude', altitudes)],
+                  height: 140,
+                  curved: false,
+                  area: true,
+                  showLegend: false,
+                  yFormat: (v) => v.toStringAsFixed(0),
+                ),
+                const UiGap(UiSpace.sm),
+                Text(
+                  'Climb ${climb.climbM.round()} m · descent ${climb.descentM.round()} m · '
+                  '${climb.minM.round()} to ${climb.maxM.round()} m',
+                  style: context.text.bodySmall?.copyWith(color: context.colors.textMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
         const UiGap(UiSpace.lg),
         UiListGroup(
           header: 'Summary',
@@ -127,10 +188,71 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
             UiKeyValue('Points', '${trip.points.length}'),
           ],
         ),
+        if (trip.hasPeaks) ...[
+          const UiGap(UiSpace.lg),
+          UiListGroup(
+            header: 'Peak g-force',
+            children: [
+              UiKeyValue('Speeding up', formatG(trip.peakAccelG ?? 0)),
+              UiKeyValue('Braking', formatG(trip.peakBrakeG ?? 0)),
+              UiKeyValue('Cornering', formatG(trip.peakTurnG ?? 0)),
+            ],
+          ),
+          const UiGap(UiSpace.lg),
+          UiListGroup(
+            header: 'Harsh moments',
+            footer: trip.events.isEmpty
+                ? 'No hard braking, hard acceleration or sharp cornering on this trip.'
+                : 'Marked on the route above. Braking counts from ${formatG(HarshKind.brake.thresholdG)}, '
+                    'acceleration from ${formatG(HarshKind.accel.thresholdG)}, '
+                    'cornering from ${formatG(HarshKind.turn.thresholdG)}.',
+            children: [
+              if (trip.events.isEmpty)
+                const UiKeyValue('Smooth drive', 'None')
+              else
+                for (final e in trip.events)
+                  UiKeyValue.custom(
+                    '${_clock(e.timeMs)}  ${e.kind.label}',
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(formatG(e.g), style: context.text.bodyMedium?.copyWith(fontWeight: FontWeight.w500)),
+                        const UiGap(UiSpace.sm),
+                        HarshMarker(kind: e.kind),
+                      ],
+                    ),
+                  ),
+            ],
+          ),
+        ],
         const UiGap(UiSpace.lg),
+        if (mapsUrl != null) ...[
+          UiButton(
+            'Open in Google Maps',
+            icon: Icons.map_outlined,
+            variant: UiButtonVariant.primary,
+            expand: true,
+            onPressed: () => _openMaps(mapsUrl),
+          ),
+          const UiGap(UiSpace.sm),
+          UiButton(
+            'Share Maps link',
+            icon: Icons.share_rounded,
+            variant: UiButtonVariant.secondary,
+            expand: true,
+            onPressed: () => _shareMaps(trip, mapsUrl),
+          ),
+          const UiGap(UiSpace.xs),
+          Text(
+            'Google Maps draws a road route through the start, the end and up to $mapsWaypoints stops along your trip, so it follows your drive closely but not exactly.',
+            style: context.text.bodySmall?.copyWith(color: context.colors.textSubtle),
+          ),
+          const UiGap(UiSpace.md),
+        ],
         UiButton(
           'Export GPX',
           icon: Icons.ios_share_rounded,
+          variant: UiButtonVariant.secondary,
           expand: true,
           onPressed: () => _export(trip),
         ),

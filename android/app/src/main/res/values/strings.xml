@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_description">Odometer, last trip, and a button to start or stop a trip.</string>
+    <string name="widget_odometer_label">Odometer</string>
+    <string name="widget_recording">● Recording</string>
+    <string name="widget_paused">Paused</string>
+    <string name="widget_start">Start trip</string>
+    <string name="widget_stop">Stop trip</string>
+</resources>

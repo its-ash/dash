@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../core/gforce.dart';
 import '../core/gps_fix.dart';
+import '../core/satellites.dart';
 import '../core/units.dart';
 
 /// State of a runtime permission, simplified for the UI.
@@ -15,6 +17,14 @@ abstract class DashPlatform {
   /// GPS fixes about once a second while someone listens. Errors with
   /// [PlatformException] (`permission`, `no_gps`).
   Stream<GpsFix> fixes();
+
+  /// Satellite counts while someone listens. Only updates while [fixes] is
+  /// listened to too (that is what keeps the GPS on).
+  Stream<SatelliteCount> satellites();
+
+  /// Accelerometer windows (about 8 a second) while someone listens. Errors
+  /// with `no_sensor` when the phone has no accelerometer.
+  Stream<AccelSample> acceleration();
 
   Future<void> keepScreenOn(bool on);
   Future<void> setMaxBrightness(bool on);
@@ -49,6 +59,20 @@ abstract class DashPlatform {
 
   /// The raw track log (JSON lines), see `parseTrackLog`.
   Future<String> readTrack();
+
+  /// Whether a trip runs in the service, and how many trips ended outside the
+  /// app (auto-stop or the widget) and still need saving.
+  Future<({bool active, int pending})> tripStatus();
+
+  /// Logs of trips that ended outside the app, oldest first.
+  Future<List<({String name, String log})>> pendingTracks();
+  Future<void> deletePending(String name);
+
+  /// Lets the service end a trip after this long without moving (0 = never).
+  Future<void> setAutoStop(Duration after);
+
+  /// Text for the home-screen widget.
+  Future<void> updateWidget({required String odometer, required String lastTrip});
 }
 
 class DashPlatformChannel implements DashPlatform {
@@ -56,12 +80,22 @@ class DashPlatformChannel implements DashPlatform {
 
   static const _method = MethodChannel('com.itsash.dash/device');
   static const _events = EventChannel('com.itsash.dash/fixes');
+  static const _gnss = EventChannel('com.itsash.dash/gnss');
+  static const _accel = EventChannel('com.itsash.dash/accel');
 
   @override
   Stream<GpsFix> fixes() => _events.receiveBroadcastStream().map((e) {
         final m = (e as Map).cast<String, Object?>();
         return GpsFix.fromJson(m);
       });
+
+  @override
+  Stream<SatelliteCount> satellites() =>
+      _gnss.receiveBroadcastStream().map((e) => SatelliteCount.fromJson((e as Map).cast<String, Object?>()));
+
+  @override
+  Stream<AccelSample> acceleration() =>
+      _accel.receiveBroadcastStream().map((e) => AccelSample.fromJson((e as Map).cast<String, Object?>()));
 
   @override
   Future<void> keepScreenOn(bool on) => _method.invokeMethod<void>('keepScreenOn', on);
@@ -126,7 +160,37 @@ class DashPlatformChannel implements DashPlatform {
 
   @override
   Future<String> readTrack() async => await _method.invokeMethod<String>('readTrack') ?? '';
+
+  @override
+  Future<({bool active, int pending})> tripStatus() async {
+    final m = (await _method.invokeMethod<Map<Object?, Object?>>('tripStatus')) ?? const {};
+    return (active: m['active'] == true, pending: (m['pending'] as num?)?.toInt() ?? 0);
+  }
+
+  @override
+  Future<List<({String name, String log})>> pendingTracks() async {
+    final list = (await _method.invokeMethod<List<Object?>>('pendingTracks')) ?? const [];
+    return [
+      for (final e in list)
+        if (e is Map) (name: '${e['name']}', log: '${e['log'] ?? ''}'),
+    ];
+  }
+
+  @override
+  Future<void> deletePending(String name) => _method.invokeMethod<void>('deletePending', name);
+
+  @override
+  Future<void> setAutoStop(Duration after) => _method.invokeMethod<void>('setAutoStop', after.inMilliseconds);
+
+  @override
+  Future<void> updateWidget({required String odometer, required String lastTrip}) =>
+      _method.invokeMethod<void>('updateWidget', {'odometer': odometer, 'lastTrip': lastTrip});
 }
+
+/// Opens [url] in the app that handles it (Google Maps for Maps links, else
+/// the browser). Returns false when nothing could open it.
+Future<bool> openExternalUrl(Uri url) async =>
+    await const MethodChannel('com.itsash.dash/device').invokeMethod<bool>('openUrl', url.toString()) ?? false;
 
 /// `openAppSettings` from permission_handler, under a name that does not clash
 /// with [DashPlatform.openAppSettings].

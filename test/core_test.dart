@@ -1,8 +1,13 @@
+import 'dart:math' as math;
+
 import 'package:dash/core/chart_data.dart';
 import 'package:dash/core/fix_filter.dart';
 import 'package:dash/core/geo.dart';
 import 'package:dash/core/gps_fix.dart';
+import 'package:dash/core/gforce.dart';
 import 'package:dash/core/gpx.dart';
+import 'package:dash/core/maps_link.dart';
+import 'package:dash/core/satellites.dart';
 import 'package:dash/core/overspeed.dart';
 import 'package:dash/core/trip.dart';
 import 'package:dash/core/trip_recorder.dart';
@@ -452,6 +457,168 @@ void main() {
         points: const [TrackPoint(timeMs: baseMs, lat: 1, lon: 2, speedMs: 0)],
       );
       expect(buildGpx(t), isNot(contains('<ele>')));
+    });
+  });
+
+  group('maps link', () {
+    test('start, end and evenly spaced stops in route order', () {
+      final trip = sampleTrip(points: 100);
+      final url = tripMapsUrl(trip)!;
+      expect(url.toString(), startsWith('https://www.google.com/maps/dir/?api=1'));
+      final q = url.queryParameters;
+      expect(q['origin'], '12.000000,77.000000');
+      final last = trip.points.last;
+      expect(q['destination'], '${last.lat.toStringAsFixed(6)},${last.lon.toStringAsFixed(6)}');
+      expect(q['travelmode'], 'driving');
+      final stops = q['waypoints']!.split('|');
+      expect(stops, hasLength(mapsWaypoints));
+      final lats = [for (final s in stops) double.parse(s.split(',').first)];
+      for (var i = 1; i < lats.length; i++) {
+        expect(lats[i], greaterThan(lats[i - 1]));
+      }
+      expect(lats.first, greaterThan(12.0));
+      expect(lats.last, lessThan(last.lat));
+    });
+
+    test('short trips get fewer stops, never the endpoints', () {
+      final q = tripMapsUrl(sampleTrip(points: 4))!.queryParameters;
+      final stops = q['waypoints']?.split('|') ?? const [];
+      expect(stops.length, lessThanOrEqualTo(2));
+      expect(stops, isNot(contains(q['origin'])));
+      expect(stops, isNot(contains(q['destination'])));
+    });
+
+    test('null for a trip with one point', () {
+      expect(tripMapsUrl(sampleTrip(points: 1)), isNull);
+    });
+  });
+
+  group('g-force', () {
+    // Phone lying flat (gravity up = +z) with the car's forward along the
+    // phone's -x axis, so the car's right is +y.
+    AccelSample flat(int i, {double fwd = 0, double right = 0, double gz = gravityMs2, double gy = 0}) =>
+        AccelSample(timeMs: baseMs + i * 125, x: -fwd, y: right, z: 0, gx: 0, gy: gy, gz: gz);
+
+    test('sensor shows only total g until GPS teaches it forward', () {
+      final m = SensorGMeter(tauMs: 1);
+      final r = m.feed(flat(0, fwd: 2));
+      expect(r.oriented, isFalse);
+      expect(r.totalG, closeTo(2 / gravityMs2, 0.01));
+    });
+
+    test('learns forward from GPS, then splits acceleration, braking and cornering', () {
+      final m = SensorGMeter(tauMs: 1);
+      var i = 0;
+      // One second speeding up at 2 m/s², one second braking at 2 m/s².
+      for (var k = 0; k < 8; k++) {
+        m.feed(flat(i++, fwd: 2));
+      }
+      m.learn(2);
+      for (var k = 0; k < 8; k++) {
+        m.feed(flat(i++, fwd: -2));
+      }
+      m.learn(-2);
+      expect(m.oriented, isTrue);
+
+      var r = m.feed(flat(i++, fwd: 3));
+      expect(r.longG, closeTo(3 / gravityMs2, 0.01));
+      expect(r.latG, closeTo(0, 0.01));
+
+      r = m.feed(flat(i++, fwd: -4));
+      expect(r.longG, closeTo(-4 / gravityMs2, 0.01));
+
+      r = m.feed(flat(i++, right: 2.5));
+      expect(r.latG, closeTo(2.5 / gravityMs2, 0.01), reason: 'push to the right = right turn');
+      r = m.feed(flat(i++, right: -2.5));
+      expect(r.latG, closeTo(-2.5 / gravityMs2, 0.01));
+    });
+
+    test('ignores tiny GPS changes and forgets forward when the phone moves in its mount', () {
+      final m = SensorGMeter(tauMs: 1);
+      m.feed(flat(0, fwd: 0.1));
+      m.learn(0.2);
+      expect(m.oriented, isFalse);
+
+      m.feed(flat(1, fwd: 2));
+      m.learn(3);
+      expect(m.oriented, isTrue);
+
+      // Tilted by about 45°: a different mount position.
+      m.feed(flat(2, gz: gravityMs2 * 0.7071, gy: gravityMs2 * 0.7071));
+      expect(m.oriented, isFalse);
+    });
+
+    test('gravity is removed even when the phone is tilted', () {
+      final m = SensorGMeter(tauMs: 1);
+      // Upright phone (gravity along +y) with a push along gravity only.
+      final r = m.feed(const AccelSample(timeMs: 0, x: 0, y: 3, z: 0, gx: 0, gy: gravityMs2, gz: 0));
+      expect(r.totalG, closeTo(0, 1e-9));
+    });
+
+    test('GPS meter: speed change and turn rate', () {
+      final m = GpsGMeter();
+      expect(m.feed(timeMs: 0, speedMs: 10, bearing: 355), isNull);
+      final r = m.feed(timeMs: 1000, speedMs: 12, bearing: 5)!;
+      expect(r.source, GSource.gps);
+      expect(r.longG, closeTo(2 / gravityMs2, 1e-6));
+      // 10° right in a second at 12 m/s: 12 × 0.1745 m/s².
+      expect(r.latG, closeTo(12 * 10 * math.pi / 180 / gravityMs2, 1e-6));
+      expect(m.lastLongMs2, closeTo(2, 1e-9));
+
+      final left = m.feed(timeMs: 2000, speedMs: 12, bearing: 355)!;
+      expect(left.latG, lessThan(0));
+    });
+
+    test('GPS meter: no cornering when slow, drops gaps and glitches', () {
+      final m = GpsGMeter();
+      m.feed(timeMs: 0, speedMs: 2, bearing: 0);
+      expect(m.feed(timeMs: 1000, speedMs: 2, bearing: 90)!.latG, 0);
+      expect(m.feed(timeMs: 10000, speedMs: 3), isNull, reason: 'gap');
+      expect(m.feed(timeMs: 11000, speedMs: 40), isNull, reason: '37 m/s² is a glitch');
+    });
+
+    test('peaks keep the highest of each kind and merge', () {
+      final p = GPeaks()
+        ..add(const GReading(totalG: 0.3, source: GSource.gps, longG: 0.3, latG: -0.1))
+        ..add(const GReading(totalG: 0.5, source: GSource.gps, longG: -0.5, latG: 0.2))
+        ..add(const GReading(totalG: 0.9, source: GSource.sensor));
+      expect(p.accelG, 0.3);
+      expect(p.brakeG, 0.5);
+      expect(p.turnG, 0.2);
+      final m = p.merged(GPeaks(accelG: 0.4));
+      expect([m.accelG, m.brakeG, m.turnG], [0.4, 0.5, 0.2]);
+    });
+
+    test('trip records GPS peaks and stores them in JSON; old trips have none', () {
+      final r = TripRecorder()..start(baseMs);
+      var lat = 12.0;
+      for (var i = 1; i <= 20; i++) {
+        final speed = i <= 10 ? i * 2.0 : 20.0 - (i - 10) * 3.0;
+        lat += speed / 111195.0;
+        r.ingest(GpsFix(timeMs: baseMs + i * 1000, lat: lat, lon: 77, speed: speed, accuracy: 5, bearing: 0));
+      }
+      expect(r.gpsPeaks.accelG, greaterThan(0.05));
+      expect(r.gpsPeaks.brakeG, greaterThan(0.05));
+      final trip = r.finish(baseMs + 21000)!;
+      expect(trip.hasPeaks, isTrue);
+      final back = Trip.fromJson(trip.toJson());
+      expect(back.peakBrakeG, closeTo(trip.peakBrakeG!, 0.001));
+
+      final old = Trip.fromJson({'id': '1', 'start': 0, 'end': 1, 'dist': 0, 'dur': 1, 'mov': 0, 'max': 0});
+      expect(old.hasPeaks, isFalse);
+    });
+
+    test('accelerometer sample parses from the channel map', () {
+      final s = AccelSample.fromJson({'t': 5, 'x': 1, 'y': 2.5, 'z': 0, 'gx': 0, 'gy': 0, 'gz': 9.8});
+      expect([s.timeMs, s.x, s.y, s.gz], [5, 1.0, 2.5, 9.8]);
+    });
+  });
+
+  group('satellites', () {
+    test('parses counts and labels them', () {
+      final s = SatelliteCount.fromJson({'v': 27, 'u': 9});
+      expect(s, const SatelliteCount(inView: 27, used: 9));
+      expect(s.label, '9 used of 27');
     });
   });
 }

@@ -13,7 +13,8 @@ class SettingsStore extends ChangeNotifier {
         _sound = _prefs?.getBool(_kSound) ?? true,
         _vibration = _prefs?.getBool(_kVibration) ?? true,
         _hudMirror = _prefs?.getBool(_kHudMirror) ?? true,
-        _odometerM = _prefs?.getDouble(_kOdometer) ?? 0;
+        _odometerM = _prefs?.getDouble(_kOdometer) ?? 0,
+        _autoTrips = _prefs?.getBool(_kAutoTrips) ?? true;
 
   /// For tests: keeps everything in memory.
   SettingsStore.memory()
@@ -25,7 +26,8 @@ class SettingsStore extends ChangeNotifier {
         _sound = true,
         _vibration = true,
         _hudMirror = true,
-        _odometerM = 0;
+        _odometerM = 0,
+        _autoTrips = true;
 
   static const defaultLimitMs = 100 / 3.6;
 
@@ -37,6 +39,7 @@ class SettingsStore extends ChangeNotifier {
   static const _kVibration = 'alert_vibration';
   static const _kHudMirror = 'hud_mirror';
   static const _kOdometer = 'odometer_m';
+  static const _kAutoTrips = 'auto_trips';
 
   static Future<SettingsStore> load() async => SettingsStore._(await SharedPreferences.getInstance());
 
@@ -49,8 +52,19 @@ class SettingsStore extends ChangeNotifier {
   bool _vibration;
   bool _hudMirror;
   double _odometerM;
+  bool _autoTrips;
 
   SpeedUnit get unit => _unit;
+
+  /// Start a trip by itself when driving with Dash open, and end it after
+  /// standing still for a while.
+  bool get autoTrips => _autoTrips;
+
+  void setAutoTrips(bool v) {
+    _autoTrips = v;
+    _prefs?.setBool(_kAutoTrips, v);
+    notifyListeners();
+  }
 
   /// Show the analog gauge instead of the big digits.
   bool get analog => _analog;

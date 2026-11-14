@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'fix_filter.dart';
+import 'gforce.dart';
 import 'gps_fix.dart';
 import 'trip.dart';
 
@@ -21,6 +22,12 @@ class PauseEvent extends TrackEvent {
 
 class ResumeEvent extends TrackEvent {
   const ResumeEvent(this.timeMs);
+  final int timeMs;
+}
+
+/// The trip ended outside the app (auto-stop or the widget) at [timeMs].
+class StopEvent extends TrackEvent {
+  const StopEvent(this.timeMs);
   final int timeMs;
 }
 
@@ -45,6 +52,8 @@ List<TrackEvent> parseTrackLog(String content) {
         events.add(PauseEvent((j['t'] as num).toInt()));
       } else if (e == 'resume') {
         events.add(ResumeEvent((j['t'] as num).toInt()));
+      } else if (e == 'stop') {
+        events.add(StopEvent((j['t'] as num).toInt()));
       } else if (j.containsKey('la')) {
         events.add(FixEvent(GpsFix.fromJson(j)));
       }
@@ -84,6 +93,20 @@ class TripRecorder {
   double _speedMs = 0;
   double? _altitude;
   double? _bearing;
+  final GpsGMeter _gMeter = GpsGMeter();
+  final GPeaks _gpsPeaks = GPeaks();
+  final HarshDetector _harsh = HarshDetector();
+
+  /// Harsh moments seen by GPS so far.
+  List<HarshEvent> get gpsEvents => List.unmodifiable(_harsh.events);
+
+  /// Peak g-forces from GPS over the recorded fixes (also while the screen
+  /// was off). The controller merges in the accelerometer's peaks.
+  GPeaks get gpsPeaks => _gpsPeaks;
+
+  /// End time from a [StopEvent], when the trip ended outside the app.
+  int? _stoppedMs;
+  int? get stoppedMs => _stoppedMs;
 
   bool get started => _startMs != null;
   bool get paused => _paused;
@@ -134,13 +157,30 @@ class TripRecorder {
     _lastEventMs = timeMs;
     _prevFixMs = null;
     _filter.reset();
+    _gMeter.reset();
+  }
+
+  /// Ends the trip at [timeMs] (which may be before fixes already fed: the
+  /// service marks the last moving moment). Later fixes are ignored.
+  void stop(int timeMs) {
+    final s = _startMs;
+    if (s == null || _stoppedMs != null) return;
+    final t = timeMs < s ? s : timeMs;
+    if (_paused) {
+      _pausedTotalMs += (t > _pausedSinceMs ? t : _pausedSinceMs) - _pausedSinceMs;
+      _paused = false;
+    }
+    _stoppedMs = t;
+    _lastEventMs = t;
+    _points.removeWhere((p) => p.timeMs > t);
+    _speedMs = 0;
   }
 
   /// Feeds one fix. Returns the processed fix, or null when the trip is not
   /// running, the fix is a duplicate or old one, or the filter rejected it.
   ProcessedFix? ingest(GpsFix fix) {
     final s = _startMs;
-    if (s == null || _paused || fix.timeMs <= _lastEventMs) return null;
+    if (s == null || _paused || _stoppedMs != null || fix.timeMs <= _lastEventMs) return null;
     final p = _filter.process(fix);
     if (p == null) return null;
 
@@ -156,6 +196,12 @@ class TripRecorder {
     }
     _prevFixMs = fix.timeMs;
     if (p.moving && p.speedMs > _maxSpeedMs) _maxSpeedMs = p.speedMs;
+    // Doppler speed reacts to braking at once; the smoothed speed lags it.
+    final g = _gMeter.feed(timeMs: fix.timeMs, speedMs: fix.speed ?? p.speedMs, bearing: p.moving ? fix.bearing : null);
+    if (g != null && p.moving) {
+      _gpsPeaks.add(g);
+      _harsh.add(g, timeMs: fix.timeMs, lat: fix.lat, lon: fix.lon);
+    }
 
     if (p.moving || fix.timeMs - _lastPointMs >= idleSampleMs) {
       _lastPointMs = fix.timeMs;
@@ -178,6 +224,8 @@ class TripRecorder {
         pause(timeMs);
       case ResumeEvent(:final timeMs):
         resume(timeMs);
+      case StopEvent(:final timeMs):
+        stop(timeMs);
       case FixEvent(:final fix):
         ingest(fix);
     }
@@ -197,7 +245,8 @@ class TripRecorder {
   Trip? finish(int endMs) {
     final s = _startMs;
     if (s == null || _points.isEmpty) return null;
-    final end = endMs < _lastEventMs ? _lastEventMs : endMs;
+    final stopped = _stoppedMs;
+    final end = stopped ?? (endMs < _lastEventMs ? _lastEventMs : endMs);
     return Trip(
       id: s.toString(),
       startMs: s,
@@ -207,6 +256,10 @@ class TripRecorder {
       movingMs: _movingMs,
       maxSpeedMs: _maxSpeedMs,
       points: thinPoints(_points, maxPoints),
+      peakAccelG: _gpsPeaks.accelG,
+      peakBrakeG: _gpsPeaks.brakeG,
+      peakTurnG: _gpsPeaks.turnG,
+      events: List.of(_harsh.events),
     );
   }
 }

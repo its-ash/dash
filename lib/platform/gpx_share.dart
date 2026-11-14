@@ -14,6 +14,11 @@ String gpxFileName(Trip trip) {
   return 'dash-${d.year}-${two(d.month)}-${two(d.day)}-${two(d.hour)}${two(d.minute)}.gpx';
 }
 
+/// Opens the share sheet with plain text (a Google Maps link to a trip).
+Future<void> shareMapsLink(String text) async {
+  await SharePlus.instance.share(ShareParams(text: text, subject: 'Dash trip'));
+}
+
 /// Writes the trip as a GPX file in the cache folder and opens the Android
 /// share sheet for it.
 Future<void> shareTripGpx(Trip trip) async {

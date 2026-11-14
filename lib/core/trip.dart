@@ -1,3 +1,5 @@
+import 'gforce.dart';
+
 /// One recorded position of a trip.
 class TrackPoint {
   const TrackPoint({required this.timeMs, required this.lat, required this.lon, required this.speedMs, this.altitude});
@@ -32,6 +34,10 @@ class Trip {
     required this.movingMs,
     required this.maxSpeedMs,
     this.points = const [],
+    this.peakAccelG,
+    this.peakBrakeG,
+    this.peakTurnG,
+    this.events = const [],
   });
 
   /// Unique id: the start time in milliseconds.
@@ -48,6 +54,33 @@ class Trip {
   final double maxSpeedMs;
   final List<TrackPoint> points;
 
+  /// Highest g-forces (positive values). Null for trips saved before Dash had
+  /// the g-force meter.
+  final double? peakAccelG;
+  final double? peakBrakeG;
+  final double? peakTurnG;
+
+  /// Harsh acceleration, braking and cornering moments, in time order.
+  final List<HarshEvent> events;
+
+  bool get hasPeaks => peakAccelG != null || peakBrakeG != null || peakTurnG != null;
+
+  /// A copy with the given peaks and harsh events.
+  Trip withGForce(GPeaks p, List<HarshEvent> events) => Trip(
+        id: id,
+        startMs: startMs,
+        endMs: endMs,
+        distanceM: distanceM,
+        durationMs: durationMs,
+        movingMs: movingMs,
+        maxSpeedMs: maxSpeedMs,
+        points: points,
+        peakAccelG: p.accelG,
+        peakBrakeG: p.brakeG,
+        peakTurnG: p.turnG,
+        events: events,
+      );
+
   /// Average speed while moving, in m/s.
   double get avgMovingSpeedMs => movingMs > 0 ? distanceM / (movingMs / 1000.0) : 0;
 
@@ -62,7 +95,12 @@ class Trip {
         durationMs: durationMs,
         movingMs: movingMs,
         maxSpeedMs: maxSpeedMs,
+        peakAccelG: peakAccelG,
+        peakBrakeG: peakBrakeG,
+        peakTurnG: peakTurnG,
       );
+
+  static double? _round(double? v) => v == null ? null : double.parse(v.toStringAsFixed(3));
 
   Map<String, Object?> toSummaryJson() => {
         'id': id,
@@ -72,9 +110,16 @@ class Trip {
         'dur': durationMs,
         'mov': movingMs,
         'max': maxSpeedMs,
+        if (peakAccelG != null) 'pa': _round(peakAccelG),
+        if (peakBrakeG != null) 'pb': _round(peakBrakeG),
+        if (peakTurnG != null) 'pt': _round(peakTurnG),
       };
 
-  Map<String, Object?> toJson() => {...toSummaryJson(), 'pts': [for (final p in points) p.toJson()]};
+  Map<String, Object?> toJson() => {
+        ...toSummaryJson(),
+        'pts': [for (final p in points) p.toJson()],
+        if (events.isNotEmpty) 'ev': [for (final e in events) e.toJson()],
+      };
 
   factory Trip.fromJson(Map<String, Object?> j) => Trip(
         id: j['id'] as String,
@@ -84,8 +129,14 @@ class Trip {
         durationMs: (j['dur'] as num).toInt(),
         movingMs: (j['mov'] as num).toInt(),
         maxSpeedMs: (j['max'] as num).toDouble(),
+        peakAccelG: (j['pa'] as num?)?.toDouble(),
+        peakBrakeG: (j['pb'] as num?)?.toDouble(),
+        peakTurnG: (j['pt'] as num?)?.toDouble(),
         points: [
           for (final p in (j['pts'] as List?) ?? const []) TrackPoint.fromJson((p as List).cast<Object?>()),
+        ],
+        events: [
+          for (final e in (j['ev'] as List?) ?? const []) HarshEvent.fromJson((e as List).cast<Object?>()),
         ],
       );
 }

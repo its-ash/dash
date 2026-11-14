@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dash/core/gforce.dart';
 import 'package:dash/core/gps_fix.dart';
+import 'package:dash/core/satellites.dart';
 import 'package:dash/core/trip.dart';
 import 'package:dash/core/units.dart';
 import 'package:dash/platform/dash_platform.dart';
+import 'package:flutter/services.dart';
 
 /// Base time for synthetic fixes (2023-11-14 22:13:20 UTC).
 const baseMs = 1700000000000;
@@ -50,6 +53,24 @@ Trip sampleTrip({String id = '1700000000000', int points = 12, double speed = 10
 /// is also appended to the track log.
 class FakePlatform implements DashPlatform {
   final _fixes = StreamController<GpsFix>.broadcast();
+  final _sats = StreamController<SatelliteCount>.broadcast();
+
+  void emitSatellites(SatelliteCount s) => _sats.add(s);
+
+  final _accel = StreamController<AccelSample>.broadcast();
+
+  /// When true, [acceleration] fails like a phone without an accelerometer.
+  bool noAccelerometer = false;
+
+  void emitAccel(AccelSample s) => _accel.add(s);
+
+  @override
+  Stream<AccelSample> acceleration() => noAccelerometer
+      ? Stream.error(PlatformException(code: 'no_sensor', message: 'No accelerometer'))
+      : _accel.stream;
+
+  @override
+  Stream<SatelliteCount> satellites() => _sats.stream;
 
   PermissionState permission = PermissionState.granted;
   bool gps = true;
@@ -61,6 +82,9 @@ class FakePlatform implements DashPlatform {
   final brightness = <bool>[];
   final screenOn = <bool>[];
   SpeedUnit? unit;
+
+  /// Time for start/pause/resume markers; tests with synthetic fix times set it.
+  int Function() clock = () => DateTime.now().millisecondsSinceEpoch;
 
   void emit(GpsFix f) {
     if (active && !paused) log += '${jsonEncode(f.toJson())}\n';
@@ -110,7 +134,7 @@ class FakePlatform implements DashPlatform {
   Future<int> startTrip() async {
     active = true;
     paused = false;
-    final t = DateTime.now().millisecondsSinceEpoch;
+    final t = clock();
     log = '{"e":"start","t":$t}\n';
     return t;
   }
@@ -118,7 +142,7 @@ class FakePlatform implements DashPlatform {
   @override
   Future<int> pauseTrip() async {
     paused = true;
-    final t = DateTime.now().millisecondsSinceEpoch;
+    final t = clock();
     log += '{"e":"pause","t":$t}\n';
     return t;
   }
@@ -126,7 +150,7 @@ class FakePlatform implements DashPlatform {
   @override
   Future<int> resumeTrip() async {
     paused = false;
-    final t = DateTime.now().millisecondsSinceEpoch;
+    final t = clock();
     log += '{"e":"resume","t":$t}\n';
     return t;
   }
@@ -144,5 +168,40 @@ class FakePlatform implements DashPlatform {
   @override
   Future<String> readTrack() async => log;
 
-  Future<void> close() => _fixes.close();
+  /// Trips that ended outside the app: name to log.
+  final Map<String, String> pending = {};
+  Duration autoStop = Duration.zero;
+  ({String odometer, String lastTrip})? widget;
+
+  /// Mimics the service ending the trip by itself (auto-stop or the widget).
+  void endInBackground(int endMs) {
+    log += '{"e":"stop","t":$endMs}\n';
+    pending['$endMs.jsonl'] = log;
+    log = '';
+    active = false;
+    paused = false;
+  }
+
+  @override
+  Future<({bool active, int pending})> tripStatus() async => (active: active, pending: pending.length);
+
+  @override
+  Future<List<({String name, String log})>> pendingTracks() async =>
+      [for (final e in pending.entries) (name: e.key, log: e.value)];
+
+  @override
+  Future<void> deletePending(String name) async => pending.remove(name);
+
+  @override
+  Future<void> setAutoStop(Duration after) async => autoStop = after;
+
+  @override
+  Future<void> updateWidget({required String odometer, required String lastTrip}) async =>
+      widget = (odometer: odometer, lastTrip: lastTrip);
+
+  Future<void> close() async {
+    await _fixes.close();
+    await _sats.close();
+    await _accel.close();
+  }
 }

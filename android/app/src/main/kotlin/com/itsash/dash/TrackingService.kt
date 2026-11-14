@@ -13,6 +13,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import org.json.JSONObject
@@ -24,6 +25,10 @@ import org.json.JSONObject
  * Uses the platform `LocationManager` GPS provider (no Google Play services).
  * Every fix is appended to [TrackLog]; the notification shows live speed and
  * distance. Pausing keeps the notification but stops writing fixes.
+ *
+ * Auto-stop: when [NativePrefs.autoStopMs] is set and the car has not moved for
+ * that long (no moving fix, or no fix at all, e.g. in a garage), the trip ends
+ * through [TripControl.endInBackground] and Dart saves it on its next run.
  */
 class TrackingService : Service() {
 
@@ -35,6 +40,14 @@ class TrackingService : Service() {
     private var lastLoc: Location? = null
     private var distanceM = 0.0
     private var lastText = ""
+    private var lastMovingMs = 0L
+    private val handler = Handler(Looper.getMainLooper())
+    private val autoStopCheck = object : Runnable {
+        override fun run() {
+            checkAutoStop()
+            handler.postDelayed(this, AUTO_STOP_CHECK_MS)
+        }
+    }
 
     private val listener = object : LocationListener {
         override fun onLocationChanged(location: Location) = handle(location)
@@ -70,11 +83,15 @@ class TrackingService : Service() {
             return START_NOT_STICKY
         }
         startInForeground(notification(title(), "Waiting for GPS..."))
+        if (lastMovingMs == 0L) lastMovingMs = System.currentTimeMillis()
+        handler.removeCallbacks(autoStopCheck)
+        handler.postDelayed(autoStopCheck, AUTO_STOP_CHECK_MS)
         startListening()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(autoStopCheck)
         stopListening()
         running = false
         super.onDestroy()
@@ -112,9 +129,11 @@ class TrackingService : Service() {
         }
         if (prefs.paused) {
             lastLoc = null
+            lastMovingMs = System.currentTimeMillis()
             update(title(), "Paused")
             return
         }
+        if (loc.hasSpeed() && loc.speed >= MOVING_MS) lastMovingMs = System.currentTimeMillis()
         // Distance for the notification only; the exact figure is computed in Dart.
         val prev = lastLoc
         if (prev != null && loc.hasAccuracy() && loc.accuracy <= 30f && loc.hasSpeed() && loc.speed > 0.42f) {
@@ -130,6 +149,13 @@ class TrackingService : Service() {
             "${Math.round(shown)} ${prefs.speedLabel}",
             "${"%.2f".format(dist)} ${prefs.distLabel} this trip",
         )
+    }
+
+    private fun checkAutoStop() {
+        val limit = prefs.autoStopMs
+        if (limit <= 0 || !prefs.tripActive || prefs.paused) return
+        if (System.currentTimeMillis() - lastMovingMs < limit) return
+        TripControl.endInBackground(this, lastMovingMs)
     }
 
     private fun title() = if (prefs.paused) "Dash: trip paused" else "Dash: recording trip"
@@ -171,6 +197,10 @@ class TrackingService : Service() {
     companion object {
         private const val CHANNEL = "trip_recording"
         private const val NOTIFICATION_ID = 21
+        private const val AUTO_STOP_CHECK_MS = 30_000L
+
+        /** Faster than this (m/s, about 5 km/h) counts as moving for auto-stop. */
+        private const val MOVING_MS = 1.4f
 
         @Volatile
         var running = false

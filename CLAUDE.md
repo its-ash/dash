@@ -3,8 +3,11 @@
 Offline GPS speedometer for car, bike, cycling and walking. Big digits or analog
 gauge (km/h, mph, knots), mirrored HUD mode for windshield reflection, speed
 limit alert, trip recording that survives screen off (Kotlin foreground
-service), trip history with route polyline and speed chart, odometer, GPX
-export. No maps, no network except the update check.
+service), automatic trips (auto-start while open, auto-stop in the service),
+home-screen widget, g-force meter (accelerometer, GPS fallback) with peaks and
+harsh-event markers, satellite count, trip history with speed-colored route,
+speed and altitude charts, Google Maps link, odometer, GPX export. No map tiles,
+no network except the update check.
 
 ## Code layout
 
@@ -17,7 +20,12 @@ export. No maps, no network except the update check.
   - `trip_recorder.dart`: `TripRecorder` (distance, moving time, max/avg, pause,
     point thinning) and the track log parser (`parseTrackLog`).
   - `overspeed.dart`: on above limit, off below limit - max(2 km/h, 3%); repeat alert every 5 s.
-  - `trip.dart`, `gpx.dart`, `chart_data.dart`.
+  - `trip.dart`, `gpx.dart`, `chart_data.dart` (speed/altitude resampling, climb/descent with 5 m hysteresis).
+  - `gforce.dart`: `SensorGMeter` (gravity removed, forward learned from GPS
+    speed change, reset when the phone turns > 20° in its mount), `GpsGMeter`
+    (Doppler speed change + speed × turn rate), `GPeaks`, `HarshDetector`
+    (brake 0.35 g, accel 0.30 g, cornering 0.40 g; same kind within 5 s merges).
+  - `maps_link.dart` (Google Maps URL, no key), `satellites.dart`.
 - `lib/platform/dash_platform.dart`: `DashPlatform` interface (faked in tests)
   and `DashPlatformChannel` over `com.itsash.dash/device` (methods) and
   `com.itsash.dash/fixes` (GPS events). Permissions via `permission_handler`.
@@ -31,9 +39,12 @@ export. No maps, no network except the update check.
 - `lib/widgets/`: `digital_speed`, `speed_gauge` (CustomPainter), `route_view` (CustomPainter).
 - `android/app/src/main/kotlin/com/itsash/dash/`: `MainActivity` (channels, GPS
   stream via `LocationManager.GPS_PROVIDER`, keep screen on, max brightness,
-  vibrate, beep), `TrackingService` (foreground service type `location`, notification
-  with live speed, appends fixes to the track log), `TrackLog` (JSON-lines file
-  + prefs).
+  vibrate, beep, GNSS and accelerometer streams, widget start intent),
+  `TrackingService` (foreground service type `location`, notification with live
+  speed, appends fixes to the track log, auto-stop after `autoStopMs` without
+  moving), `TripControl` (start / end in background), `DashWidget` (home-screen
+  widget; Start opens the app, Stop ends in background), `TrackLog` (JSON-lines
+  file, `pending/`, prefs).
 
 ## How a trip works
 
@@ -42,6 +53,12 @@ The service only logs raw fixes and start/pause/resume markers to
 trip maths is in Dart. While the app is visible it also feeds live fixes to the
 same recorder (duplicates are ignored by timestamp). On launch or resume an
 active trip is rebuilt from the log. Stop saves the trip if it is at least 30 m.
+
+A trip that ends without the app (auto-stop or the widget's Stop) gets a
+`{"e":"stop","t":ms}` marker and its log moves to `files/pending/`. Dart saves
+pending trips on start and every few seconds while open (`_syncWithService`).
+Auto-start happens only in Dart while the app is open: Android does not let a
+closed app start location tracking without background location permission.
 
 ## Commands
 

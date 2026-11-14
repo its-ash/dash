@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Home-screen widget, light. Matches the theme package's light colors. -->
+    <color name="widget_bg">#FFFFFFFF</color>
+    <color name="widget_text">#FF111111</color>
+    <color name="widget_muted">#FF6B6B76</color>
+    <color name="widget_accent">#FF4F46E5</color>
+    <color name="widget_danger">#FFDC2626</color>
+    <color name="widget_on_accent">#FFFFFFFF</color>
+</resources>

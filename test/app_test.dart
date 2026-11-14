@@ -1,3 +1,5 @@
+import 'package:dash/core/gforce.dart';
+import 'package:dash/core/satellites.dart';
 import 'package:dash/core/trip.dart';
 import 'package:dash/core/units.dart';
 import 'package:dash/main.dart';
@@ -53,6 +55,45 @@ void main() {
     expect(platform.screenOn, contains(true));
     await tester.pumpWidget(const SizedBox());
     expect(platform.screenOn.last, isFalse);
+    await platform.close();
+  });
+
+  testWidgets('shows the satellite count in the GPS card', (tester) async {
+    final platform = FakePlatform();
+    await pumpApp(tester, platform: platform, settings: SettingsStore.memory());
+    expect(find.text('Satellites'), findsOneWidget);
+    platform.emitSatellites(const SatelliteCount(inView: 24, used: 11));
+    await settle(tester);
+    expect(find.text('11 used of 24'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await platform.close();
+  });
+
+  testWidgets('g-force card uses the accelerometer when it sends data', (tester) async {
+    final platform = FakePlatform();
+    await pumpApp(tester, platform: platform, settings: SettingsStore.memory());
+    expect(find.text('G-force'), findsOneWidget);
+    platform.emitAccel(const AccelSample(timeMs: 0, x: 2, y: 0, z: 0, gx: 0, gy: 0, gz: gravityMs2));
+    await settle(tester);
+    expect(find.text('Accelerometer'), findsOneWidget);
+    // Forward is not learned yet, so only the total is known.
+    expect(find.text('Learning direction'), findsNWidgets(2));
+    expect(find.textContaining('Keep the phone fixed in its mount'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await platform.close();
+  });
+
+  testWidgets('g-force falls back to GPS on a phone without an accelerometer', (tester) async {
+    final platform = FakePlatform()..noAccelerometer = true;
+    await pumpApp(tester, platform: platform, settings: SettingsStore.memory());
+    expect(find.text('GPS (no accelerometer)'), findsOneWidget);
+    for (var i = 1; i <= 4; i++) {
+      platform.emit(northFix(i, base: DateTime.now().millisecondsSinceEpoch - 5000));
+    }
+    await settle(tester);
+    expect(find.textContaining('comes from GPS speed and heading'), findsOneWidget);
+    expect(find.text('Learning direction'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
     await platform.close();
   });
 
@@ -273,6 +314,8 @@ void main() {
     await repo.save(sampleTrip());
     final settings = SettingsStore.memory()..addOdometer(2500);
     final shared = <Trip>[];
+    final opened = <Uri>[];
+    final texts = <String>[];
 
     await tester.pumpWidget(UiApp(home: TripsScreen(repository: repo, settings: settings)));
     await settle(tester);
@@ -292,9 +335,30 @@ void main() {
         repository: repo,
         settings: settings,
         share: (t) async => shared.add(t),
+        openUrl: (u) async {
+          opened.add(u);
+          return true;
+        },
+        shareText: (s) async => texts.add(s),
       ),
     ));
     await settle(tester);
+
+    final maps = find.widgetWithText(UiButton, 'Open in Google Maps').first;
+    await tester.ensureVisible(maps);
+    await settle(tester);
+    await tester.tap(maps);
+    await settle(tester);
+    expect(opened.single.host, 'www.google.com');
+    expect(opened.single.queryParameters['origin'], '12.000000,77.000000');
+
+    final shareLink = find.widgetWithText(UiButton, 'Share Maps link').first;
+    await tester.ensureVisible(shareLink);
+    await settle(tester);
+    await tester.tap(shareLink);
+    await settle(tester);
+    expect(texts.single, contains('https://www.google.com/maps/dir/'));
+
     final export = find.widgetWithText(UiButton, 'Export GPX').first;
     await tester.ensureVisible(export);
     await settle(tester);

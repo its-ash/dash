@@ -2,6 +2,11 @@ package com.itsash.dash
 
 import android.content.Context
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.location.GnssStatus
 import android.location.Location
 import android.media.AudioManager
 import android.media.ToneGenerator
@@ -11,9 +16,11 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.net.Uri
 import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
@@ -25,8 +32,15 @@ import io.flutter.plugin.common.MethodChannel
  * Channels (names match `lib/platform/dash_platform.dart`):
  * - `com.itsash.dash/device` (method): `keepScreenOn`, `maxBrightness`, `vibrate(ms)`, `beep`,
  *   `gpsEnabled`, `openLocationSettings`, `setUnit`, `startTrip`, `pauseTrip`,
- *   `resumeTrip`, `stopTrip`, `tripActive`, `readTrack`.
+ *   `resumeTrip`, `stopTrip`, `tripActive`, `readTrack`, `openUrl(url)`, `tripStatus`
+ *   ({active, pending}), `pendingTracks` ([{name, log}]), `deletePending(name)`,
+ *   `setAutoStop(ms)`, `updateWidget({odometer, lastTrip})`.
  * - `com.itsash.dash/fixes` (events): one map per GPS fix (keys t, la, lo, al, sp, ac, be).
+ * - `com.itsash.dash/gnss` (events): satellite counts on each GNSS status (keys v = in view,
+ *   u = used in fix). Only fires while the GPS is running, i.e. while `fixes` is listened to.
+ * - `com.itsash.dash/accel` (events): accelerometer averaged over ~125 ms windows, phone frame,
+ *   m/s² (keys t, x/y/z = acceleration without gravity, gx/gy/gz = gravity). Errors with
+ *   `no_sensor` when the phone has no accelerometer.
  */
 class MainActivity : FlutterActivity() {
     private lateinit var prefs: NativePrefs
@@ -34,6 +48,23 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = NativePrefs(applicationContext)
+        handleWidgetIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleWidgetIntent(intent)
+    }
+
+    /** Start trip from the home-screen widget. Dart picks the trip up from the log. */
+    private fun handleWidgetIntent(intent: Intent?) {
+        if (intent?.action != DashWidget.ACTION_START_TRIP) return
+        intent.action = Intent.ACTION_MAIN
+        if (prefs.tripActive) return
+        val granted = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) return // Dash shows its own permission prompt.
+        runCatching { TripControl.start(this) }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -81,17 +112,9 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "startTrip" -> {
-                    val now = System.currentTimeMillis()
-                    TrackLog.clear(applicationContext)
-                    TrackLog.marker(applicationContext, "start", now)
-                    prefs.paused = false
-                    prefs.tripActive = true
                     try {
-                        TrackingService.start(applicationContext)
-                        result.success(now)
+                        result.success(TripControl.start(applicationContext))
                     } catch (e: Exception) {
-                        prefs.tripActive = false
-                        TrackLog.clear(applicationContext)
                         result.error("service", e.message, null)
                     }
                 }
@@ -99,12 +122,14 @@ class MainActivity : FlutterActivity() {
                     val now = System.currentTimeMillis()
                     TrackLog.marker(applicationContext, "pause", now)
                     prefs.paused = true
+                    DashWidget.refresh(applicationContext)
                     result.success(now)
                 }
                 "resumeTrip" -> {
                     val now = System.currentTimeMillis()
                     TrackLog.marker(applicationContext, "resume", now)
                     prefs.paused = false
+                    DashWidget.refresh(applicationContext)
                     result.success(now)
                 }
                 "stopTrip" -> {
@@ -112,15 +137,45 @@ class MainActivity : FlutterActivity() {
                     prefs.paused = false
                     TrackingService.stop(applicationContext)
                     TrackLog.clear(applicationContext)
+                    DashWidget.refresh(applicationContext)
+                    result.success(null)
+                }
+                "tripStatus" -> result.success(
+                    mapOf("active" to prefs.tripActive, "pending" to TrackLog.pendingCount(applicationContext)),
+                )
+                "pendingTracks" -> result.success(TrackLog.pending(applicationContext))
+                "deletePending" -> {
+                    (call.arguments as? String)?.let { TrackLog.deletePending(applicationContext, it) }
+                    DashWidget.refresh(applicationContext)
+                    result.success(null)
+                }
+                "setAutoStop" -> {
+                    prefs.autoStopMs = (call.arguments as? Number)?.toLong() ?: 0L
+                    result.success(null)
+                }
+                "updateWidget" -> {
+                    val a = call.arguments as? Map<*, *>
+                    prefs.widgetOdometer = a?.get("odometer") as? String ?: ""
+                    prefs.widgetLastTrip = a?.get("lastTrip") as? String ?: ""
+                    DashWidget.refresh(applicationContext)
                     result.success(null)
                 }
                 "tripActive" -> result.success(prefs.tripActive)
                 "readTrack" -> result.success(TrackLog.read(applicationContext))
+                "openUrl" -> {
+                    val url = call.arguments as? String
+                    val ok = url != null && runCatching {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }.isSuccess
+                    result.success(ok)
+                }
                 else -> result.notImplemented()
             }
         }
 
         EventChannel(messenger, "$CHANNEL/fixes").setStreamHandler(FixStreamHandler())
+        EventChannel(messenger, "$CHANNEL/gnss").setStreamHandler(GnssStreamHandler())
+        EventChannel(messenger, "$CHANNEL/accel").setStreamHandler(AccelStreamHandler())
     }
 
     private fun setFlag(flag: Int, on: Boolean) {
@@ -181,6 +236,123 @@ class MainActivity : FlutterActivity() {
             val l = listener ?: return
             val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
             runCatching { lm.removeUpdates(l) }
+            listener = null
+        }
+    }
+
+    /** Satellite counts from [GnssStatus] while Dart listens. */
+    private inner class GnssStreamHandler : EventChannel.StreamHandler {
+        private var callback: GnssStatus.Callback? = null
+
+        override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val cb = object : GnssStatus.Callback() {
+                override fun onSatelliteStatusChanged(status: GnssStatus) {
+                    var used = 0
+                    for (i in 0 until status.satelliteCount) if (status.usedInFix(i)) used++
+                    events.success(mapOf("v" to status.satelliteCount, "u" to used))
+                }
+
+                override fun onStopped() {
+                    events.success(mapOf("v" to 0, "u" to 0))
+                }
+            }
+            try {
+                @Suppress("DEPRECATION")
+                lm.registerGnssStatusCallback(cb, Handler(Looper.getMainLooper()))
+                callback = cb
+            } catch (e: SecurityException) {
+                // No permission yet: the fixes stream reports it; counts just stay empty.
+            }
+        }
+
+        override fun onCancel(arguments: Any?) {
+            val cb = callback ?: return
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            runCatching { lm.unregisterGnssStatusCallback(cb) }
+            callback = null
+        }
+    }
+
+    /**
+     * Linear acceleration and gravity for the g-force meter. Uses the fused
+     * LINEAR_ACCELERATION + GRAVITY sensors when the phone has them, else the raw
+     * accelerometer with a low-pass filter for gravity.
+     */
+    private inner class AccelStreamHandler : EventChannel.StreamHandler {
+        private var listener: SensorEventListener? = null
+
+        override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+            val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            val linear = sm?.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+            val gravity = sm?.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            val raw = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            val fused = linear != null && gravity != null
+            if (sm == null || (!fused && raw == null)) {
+                events.error("no_sensor", "This phone has no accelerometer.", null)
+                return
+            }
+            val lin = FloatArray(3)
+            val grav = FloatArray(3)
+            var haveGrav = false
+            val sum = DoubleArray(3)
+            var n = 0
+            var windowStart = 0L
+            val l = object : SensorEventListener {
+                override fun onSensorChanged(e: SensorEvent) {
+                    val v = e.values
+                    when (e.sensor.type) {
+                        Sensor.TYPE_GRAVITY -> {
+                            for (i in 0..2) grav[i] = v[i]
+                            haveGrav = true
+                            return
+                        }
+                        Sensor.TYPE_LINEAR_ACCELERATION -> for (i in 0..2) lin[i] = v[i]
+                        Sensor.TYPE_ACCELEROMETER -> {
+                            if (!haveGrav) {
+                                for (i in 0..2) grav[i] = v[i]
+                                haveGrav = true
+                            } else {
+                                for (i in 0..2) grav[i] += 0.03f * (v[i] - grav[i])
+                            }
+                            for (i in 0..2) lin[i] = v[i] - grav[i]
+                        }
+                        else -> return
+                    }
+                    if (!haveGrav) return
+                    for (i in 0..2) sum[i] += lin[i].toDouble()
+                    n++
+                    val now = SystemClock.elapsedRealtime()
+                    if (windowStart == 0L) windowStart = now
+                    if (now - windowStart >= 125) {
+                        events.success(
+                            mapOf(
+                                "t" to System.currentTimeMillis(),
+                                "x" to sum[0] / n, "y" to sum[1] / n, "z" to sum[2] / n,
+                                "gx" to grav[0].toDouble(), "gy" to grav[1].toDouble(), "gz" to grav[2].toDouble(),
+                            ),
+                        )
+                        sum.fill(0.0)
+                        n = 0
+                        windowStart = now
+                    }
+                }
+
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            }
+            val ok = if (fused) {
+                sm.registerListener(l, linear!!, SensorManager.SENSOR_DELAY_GAME) &&
+                    sm.registerListener(l, gravity!!, SensorManager.SENSOR_DELAY_GAME)
+            } else {
+                sm.registerListener(l, raw!!, SensorManager.SENSOR_DELAY_GAME)
+            }
+            listener = l
+            if (!ok) events.error("no_sensor", "The accelerometer could not be started.", null)
+        }
+
+        override fun onCancel(arguments: Any?) {
+            val l = listener ?: return
+            (getSystemService(Context.SENSOR_SERVICE) as? SensorManager)?.unregisterListener(l)
             listener = null
         }
     }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:theme/theme.dart';
 
 import '../core/geo.dart';
+import '../core/gforce.dart';
 import '../core/gps_fix.dart';
 import '../core/trip.dart';
 import '../core/units.dart';
@@ -9,6 +10,7 @@ import '../settings/settings_store.dart';
 import '../state/dash_controller.dart';
 import '../storage/trip_repository.dart';
 import '../widgets/digital_speed.dart';
+import '../widgets/g_dial.dart';
 import '../widgets/speed_gauge.dart';
 import 'hud_screen.dart';
 import 'settings_screen.dart';
@@ -81,6 +83,23 @@ class _Body extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _problem(context),
+        if (controller.autoSaved case final saved?)
+          _gap(
+            UiAlert(
+              'Dash ended a trip of ${formatDistance(saved.distanceM, unit)} by itself and saved it.',
+              title: 'Trip saved',
+              status: UiStatus.success,
+              action: UiButton(
+                'View trip',
+                icon: Icons.route_rounded,
+                variant: UiButtonVariant.secondary,
+                onPressed: () {
+                  controller.clearAutoSaved();
+                  onOpenTrip(saved);
+                },
+              ),
+            ),
+          ),
         _statusRow(context),
         const UiGap(UiSpace.md),
         Center(
@@ -119,6 +138,8 @@ class _Body extends StatelessWidget {
         _tripControls(context),
         const UiGap(UiSpace.lg),
         _tripStats(context, unit),
+        const UiGap(UiSpace.lg),
+        _gforce(context),
         const UiGap(UiSpace.lg),
         _position(context, unit),
         const UiGap(UiSpace.lg),
@@ -251,7 +272,7 @@ class _Body extends StatelessWidget {
     final state = controller.tripState;
     final header = switch (state) {
       TripState.idle => 'Trip (not recording)',
-      TripState.recording => 'Trip (recording)',
+      TripState.recording => controller.autoStarted ? 'Trip (recording, started automatically)' : 'Trip (recording)',
       TripState.paused => 'Trip (paused)',
     };
     final active = controller.tripActive;
@@ -265,6 +286,66 @@ class _Body extends StatelessWidget {
         UiKeyValue('Moving time', active ? formatDuration(controller.tripMoving) : '--'),
         UiKeyValue('Average speed', speed(controller.tripAvgMs)),
         UiKeyValue('Max speed', speed(controller.tripMaxMs)),
+      ],
+    );
+  }
+
+  Widget _gforce(BuildContext context) {
+    final r = controller.gforce;
+    final sensor = controller.gSource == GSource.sensor;
+    final long = r?.longG, lat = r?.latG;
+    const still = 0.02;
+    final longText = r == null
+        ? '--'
+        : long == null
+            ? 'Learning direction'
+            : long > still
+                ? '${formatG(long)} speeding up'
+                : long < -still
+                    ? '${formatG(long)} braking'
+                    : formatG(0);
+    final latText = r == null
+        ? '--'
+        : lat == null
+            ? 'Learning direction'
+            : lat > still
+                ? '${formatG(lat)} right'
+                : lat < -still
+                    ? '${formatG(lat)} left'
+                    : formatG(0);
+    final source = sensor
+        ? 'Accelerometer'
+        : controller.accelerometerMissing
+            ? 'GPS (no accelerometer)'
+            : 'GPS (accelerometer not responding)';
+    final String? footer;
+    if (sensor && r != null && !r.oriented) {
+      footer = 'Drive for a moment: Dash learns which way your phone faces from GPS speed changes. '
+          'Keep the phone fixed in its mount.';
+    } else if (!sensor) {
+      footer = 'Without the accelerometer, g-force comes from GPS speed and heading about once a second, '
+          'so short jolts do not show.';
+    } else {
+      footer = null;
+    }
+    final peaks = controller.tripPeaks;
+    return UiListGroup(
+      header: 'G-force',
+      footer: footer,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: UiSpace.md),
+          child: Center(child: GDial(reading: r)),
+        ),
+        UiKeyValue('Speeding up / braking', longText),
+        UiKeyValue('Cornering', latText),
+        UiKeyValue('Total', r == null ? '--' : formatG(r.totalG)),
+        UiKeyValue('Source', source),
+        if (controller.tripActive)
+          UiKeyValue(
+            'Trip peaks',
+            'accel ${peaks.accelG.toStringAsFixed(2)} · brake ${peaks.brakeG.toStringAsFixed(2)} · turn ${peaks.turnG.toStringAsFixed(2)} g',
+          ),
       ],
     );
   }
@@ -285,6 +366,7 @@ class _Body extends StatelessWidget {
         UiKeyValue('Heading', bearing != null ? '${bearing.round()}° ${headingLabel(bearing)}' : '--'),
         UiKeyValue('Accuracy', acc != null && controller.hasFreshFix ? '±${acc.round()} m' : '--'),
         UiKeyValue('Signal', status),
+        UiKeyValue('Satellites', controller.satellites?.label ?? '--'),
         UiKeyValue('Odometer', formatDistance(settings.odometerM, unit)),
       ],
     );

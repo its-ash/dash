@@ -43,6 +43,22 @@ class SettingsScreen extends StatelessWidget {
               ),
               const UiGap(UiSpace.lg),
               UiListGroup(
+                header: 'Trips',
+                footer: 'A trip starts after about 20 seconds above 15 km/h while Dash is open, and ends after '
+                    '5 minutes without moving, also with the screen off. Android does not let Dash start a trip '
+                    'while it is closed; use the home-screen widget for that.',
+                children: [
+                  UiSwitchTile(
+                    'Automatic trips',
+                    subtitle: 'Start and stop recording by itself',
+                    icon: Icons.auto_mode_rounded,
+                    value: settings.autoTrips,
+                    onChanged: settings.setAutoTrips,
+                  ),
+                ],
+              ),
+              const UiGap(UiSpace.lg),
+              UiListGroup(
                 header: 'Speed limit alert',
                 footer: 'The warning turns off again a little below the limit, so it does not flicker.',
                 children: [
@@ -90,8 +106,9 @@ class SettingsScreen extends StatelessWidget {
                 children: [
                   UiListTile(
                     'Everything stays on this phone',
-                    subtitle: 'Dash reads GPS only. Trips are saved on this phone and shared only when you export a GPX '
-                        'file. It uses the internet only to check for app updates.',
+                    subtitle: 'Dash reads GPS and the motion sensors. Trips are saved on this phone and leave it only '
+                        'when you export a GPX file or open or share a Google Maps link. It uses the internet only '
+                        'to check for app updates.',
                     icon: Icons.lock_rounded,
                     iconStatus: UiStatus.success,
                   ),
