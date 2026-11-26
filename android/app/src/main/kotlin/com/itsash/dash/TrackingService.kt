@@ -77,12 +77,18 @@ class TrackingService : Service() {
         // A null intent means Android restarted us after killing the process.
         if (!prefs.tripActive) {
             // Must still call startForeground() when started with startForegroundService().
-            startInForeground(notification("Dash", "Trip ended"))
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            if (startForegroundSafely(notification("Dash", "Trip ended"))) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            prefs.tripActive = false
             stopSelf()
             return START_NOT_STICKY
         }
-        startInForeground(notification(title(), "Waiting for GPS..."))
+        if (!startForegroundSafely(notification(title(), "Waiting for GPS..."))) {
+            prefs.tripActive = false
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (lastMovingMs == 0L) lastMovingMs = System.currentTimeMillis()
         handler.removeCallbacks(autoStopCheck)
         handler.postDelayed(autoStopCheck, AUTO_STOP_CHECK_MS)
@@ -184,6 +190,15 @@ class TrackingService : Service() {
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_NAVIGATION)
             .build()
+    }
+
+    private fun startForegroundSafely(n: Notification): Boolean = try {
+        startInForeground(n)
+        true
+    } catch (_: SecurityException) {
+        false
+    } catch (_: RuntimeException) {
+        false
     }
 
     private fun startInForeground(n: Notification) {

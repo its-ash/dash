@@ -111,6 +111,7 @@ class SettingsScreen extends StatelessWidget {
                         'to check for app updates.',
                     icon: Icons.lock_rounded,
                     iconStatus: UiStatus.success,
+                    maxSubtitleLines: 6,
                   ),
                 ],
               ),

@@ -83,6 +83,9 @@ class DashController extends ChangeNotifier {
   Timer? _timer;
   bool _started = false;
   bool _disposed = false;
+  int _gen = 0;
+  bool _starting = false;
+  bool _stopping = false;
   int _ticks = 0;
 
   FeedProblem problem = FeedProblem.none;
@@ -137,16 +140,25 @@ class DashController extends ChangeNotifier {
   Future<void> start() async {
     if (_started || _disposed) return;
     _started = true;
+    final gen = _gen;
     await platform.keepScreenOn(true);
+    if (gen != _gen || _disposed) return;
     await platform.setUnit(settings.unit);
+    if (gen != _gen || _disposed) return;
     settings.addListener(_onSettings);
     _live.reset();
     _timer = Timer.periodic(_tickEvery, (_) => _onTick());
     await _syncTrip();
+    if (gen != _gen || _disposed) return;
     await _savePending();
+    if (gen != _gen || _disposed) return;
     await _pushAutoStop();
+    if (gen != _gen || _disposed) return;
     _connectAccelerometer();
-    await _connect();
+    final connecting = _connect();
+    final connectGen = _gen;
+    await connecting;
+    if (connectGen != _gen || _disposed) return;
     await refreshWidget();
   }
 
@@ -242,16 +254,20 @@ class DashController extends ChangeNotifier {
   Future<void> pause() async {
     if (!_started) return;
     _started = false;
+    _gen++;
     settings.removeListener(_onSettings);
     _timer?.cancel();
     _timer = null;
-    await _sub?.cancel();
+    final sub = _sub;
     _sub = null;
-    await _satSub?.cancel();
+    await sub?.cancel();
+    final satSub = _satSub;
     _satSub = null;
+    await satSub?.cancel();
     satellites = null;
-    await _accelSub?.cancel();
+    final accelSub = _accelSub;
     _accelSub = null;
+    await accelSub?.cancel();
     _lastSensorAtMs = null;
     await platform.keepScreenOn(false);
   }
@@ -259,6 +275,7 @@ class DashController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _gen++;
     settings.removeListener(_onSettings);
     _timer?.cancel();
     _sub?.cancel();
@@ -289,25 +306,33 @@ class DashController extends ChangeNotifier {
   }
 
   Future<void> _connect() async {
-    await _sub?.cancel();
+    final gen = ++_gen;
+    final prevSub = _sub;
     _sub = null;
-    await _satSub?.cancel();
+    final prevSat = _satSub;
     _satSub = null;
+    await prevSub?.cancel();
+    if (gen != _gen || _disposed) return;
+    await prevSat?.cancel();
+    if (gen != _gen || _disposed) return;
     final perm = await platform.locationPermission();
+    if (gen != _gen || _disposed) return;
     if (perm != PermissionState.granted) {
       problem = perm == PermissionState.blocked ? FeedProblem.permissionBlocked : FeedProblem.permission;
       _notify();
       return;
     }
-    problem = await platform.gpsEnabled() ? FeedProblem.none : FeedProblem.gpsOff;
-    _sub = platform.fixes().listen(
+    final enabled = await platform.gpsEnabled();
+    if (gen != _gen || _disposed) return;
+    problem = enabled ? FeedProblem.none : FeedProblem.gpsOff;
+    final sub = platform.fixes().listen(
       _onFix,
       onError: (Object e) {
         problem = e is PlatformException && e.code == 'permission' ? FeedProblem.permission : FeedProblem.noGps;
         _notify();
       },
     );
-    _satSub = platform.satellites().listen(
+    final satSub = platform.satellites().listen(
       (s) {
         if (s == satellites) return;
         satellites = s;
@@ -315,12 +340,21 @@ class DashController extends ChangeNotifier {
       },
       onError: (Object _) {},
     );
+    if (gen != _gen || _disposed) {
+      await sub.cancel();
+      await satSub.cancel();
+      return;
+    }
+    _sub = sub;
+    _satSub = satSub;
     _notify();
   }
 
   /// Asks for location permission and starts the feed when granted.
   Future<void> requestPermission() async {
+    final gen = _gen;
     final state = await platform.requestLocationPermission();
+    if (gen != _gen || _disposed) return;
     if (state == PermissionState.blocked) {
       problem = FeedProblem.permissionBlocked;
       _notify();
@@ -352,7 +386,7 @@ class DashController extends ChangeNotifier {
   }
 
   void _checkAutoStart() {
-    if (!settings.autoTrips || tripActive || problem != FeedProblem.none) {
+    if (!settings.autoTrips || tripActive || _starting || problem != FeedProblem.none) {
       _fastSinceMs = null;
       return;
     }
@@ -417,17 +451,35 @@ class DashController extends ChangeNotifier {
   /// Starts a trip. [auto] is true for automatic trips: no permission dialog
   /// pops up while driving.
   Future<void> startTrip({bool auto = false}) async {
-    if (tripActive || problem == FeedProblem.permission || problem == FeedProblem.permissionBlocked) return;
-    if (!auto) await platform.requestNotificationPermission();
-    await platform.setUnit(settings.unit);
-    await _pushAutoStop();
-    final t = await platform.startTrip();
-    autoStarted = auto;
-    _sensorPeaks.reset();
-    _sensorHarsh.reset();
-    _recorder = TripRecorder()..start(t);
-    tripState = TripState.recording;
-    _notify();
+    if (_starting ||
+        _stopping ||
+        tripActive ||
+        problem == FeedProblem.permission ||
+        problem == FeedProblem.permissionBlocked) {
+      return;
+    }
+    _starting = true;
+    try {
+      if (!auto) await platform.requestNotificationPermission();
+      if (_disposed) return;
+      await platform.setUnit(settings.unit);
+      await _pushAutoStop();
+      final int t;
+      try {
+        t = await platform.startTrip();
+      } on PlatformException {
+        return;
+      }
+      if (_disposed) return;
+      autoStarted = auto;
+      _sensorPeaks.reset();
+      _sensorHarsh.reset();
+      _recorder = TripRecorder()..start(t);
+      tripState = TripState.recording;
+      _notify();
+    } finally {
+      _starting = false;
+    }
   }
 
   Future<void> pauseTrip() async {
@@ -449,25 +501,30 @@ class DashController extends ChangeNotifier {
   /// Ends the trip. Returns the saved trip, or null when it was too short to
   /// keep (under [minSavedTripM]).
   Future<Trip?> stopTrip() async {
-    if (_recorder == null) return null;
-    await _syncTrip();
-    final peaks = tripPeaks;
-    final finished = _recorder?.finish(_now());
-    final trip = finished?.withGForce(peaks, mergeHarshEvents(finished.events, _sensorHarsh.events));
-    _sensorPeaks.reset();
-    _sensorHarsh.reset();
-    await platform.stopTrip();
-    _recorder = null;
-    tripState = TripState.idle;
-    autoStarted = false;
-    Trip? saved;
-    if (trip != null && trip.distanceM >= minSavedTripM) {
-      await repository.save(trip);
-      settings.addOdometer(trip.distanceM);
-      saved = trip;
+    if (_stopping || _recorder == null) return null;
+    _stopping = true;
+    try {
+      await _syncTrip();
+      final peaks = tripPeaks;
+      final finished = _recorder?.finish(_now());
+      final trip = finished?.withGForce(peaks, mergeHarshEvents(finished.events, _sensorHarsh.events));
+      _sensorPeaks.reset();
+      _sensorHarsh.reset();
+      await platform.stopTrip();
+      _recorder = null;
+      tripState = TripState.idle;
+      autoStarted = false;
+      Trip? saved;
+      if (trip != null && trip.distanceM >= minSavedTripM) {
+        await repository.save(trip);
+        settings.addOdometer(trip.distanceM);
+        saved = trip;
+      }
+      await refreshWidget();
+      _notify();
+      return saved;
+    } finally {
+      _stopping = false;
     }
-    await refreshWidget();
-    _notify();
-    return saved;
   }
 }
